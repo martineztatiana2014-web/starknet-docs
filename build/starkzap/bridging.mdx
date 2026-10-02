@@ -1,26 +1,28 @@
 ---
 title: Bridging
-description: "Bridge assets from Ethereum or Solana into Starknet using Starkzap bridge tokens, external wallet adapters, and deposit APIs"
+description: "Bridge assets between Ethereum or Solana and Starknet using Starkzap bridge tokens, external wallet adapters, deposit and withdrawal APIs"
 icon: link
 ---
 
 ## Overview
 
-Starkzap supports **deposit bridging into Starknet** from supported external chains:
+Starkzap supports **bidirectional bridging** between Starknet and supported external chains:
 
-- **Ethereum** (Canonical, CCTP, OFT, OFT-migrated routes)
-- **Solana** (Hyperlane routes)
+- **Ethereum** (Canonical, CCTP, OFT, OFT-migrated, Layerswap routes)
+- **Solana** (Hyperlane, Layerswap routes)
 
-The bridge flow is:
+**Deposit flow (external chain → Starknet):**
 1. Configure the SDK (including optional bridging config)
 2. Fetch bridgeable tokens with `sdk.getBridgingTokens(...)`
 3. Connect an external wallet (`ConnectedEthereumWallet` or `ConnectedSolanaWallet`)
 4. Inspect balance, allowance, and estimated fees
 5. Call `wallet.deposit(...)` to submit the source-chain transaction
 
-<Info>
-  Current wallet bridge APIs are for **external chain → Starknet deposits**. Outbound Starknet → external bridge flows are not exposed through this API surface.
-</Info>
+**Withdraw flow (Starknet → external chain):**
+1. Inspect L2 balance and estimated fees with `wallet.getWithdrawBalance(...)` and `wallet.getInitiateWithdrawFeeEstimate(...)`
+2. Call `wallet.initiateWithdraw(...)` to burn/lock tokens on Starknet
+3. Monitor status with `wallet.getWithdrawalState(...)` or `wallet.monitorWithdrawal(...)`
+4. For Canonical and CCTP: call `wallet.completeWithdraw(...)` when state is `READY_TO_CLAIM`
 
 ## Install Optional Dependencies
 
@@ -31,7 +33,13 @@ For Ethereum routes:
 npm install ethers
 ```
 
-For Solana routes:
+For Solana **Layerswap** routes (the Layerswap client is inlined — no Hyperlane packages needed):
+
+```bash
+npm install @solana/web3.js
+```
+
+For Solana **Hyperlane** routes:
 
 ```bash
 npm install @solana/web3.js @hyperlane-xyz/sdk @hyperlane-xyz/registry @hyperlane-xyz/utils
@@ -51,12 +59,27 @@ const sdk = new StarkZap({
     ethereumRpcUrl: "https://eth-mainnet.g.alchemy.com/v2/<key>",
     solanaRpcUrl: "https://solana-mainnet.g.alchemy.com/v2/<key>",
     layerZeroApiKey: "<layerzero-key>", // required for OFT/OFT-migrated routes
+    layerswapApiKey: "<layerswap-key>", // required for Layerswap routes + token discovery
+    layerswapBaseUrl: "https://api.layerswap.io", // optional; this is the default
+    layerswapAllowedContracts: [], // Starknet contracts Layerswap may call besides the token; see below
   },
 });
 ```
 
 <Warning>
   OFT bridging requires `bridging.layerZeroApiKey` and is supported on Starknet Mainnet routes only.
+</Warning>
+
+<Warning>
+  Layerswap routes **and** Layerswap token discovery require `bridging.layerswapApiKey`. Without it, `getBridgingTokens(...)` omits Layerswap-bridgeable tokens and Layerswap deposits/withdrawals fail.
+
+  Layerswap API keys are environment-scoped: use a **Mainnet** key with Starknet Mainnet and a **Testnet** key with Starknet Sepolia.
+</Warning>
+
+<Warning>
+  **Layerswap withdrawals sign calls that come from the Layerswap API.** Starkzap checks every one of them before the wallet signs: a call on the bridge token must be a `transfer`, and any other call must target a contract listed in `bridging.layerswapAllowedContracts`. With that list unset or empty, only the transfer is accepted, and a deposit action carrying any other call fails before signing with an error naming the address.
+
+  Before enabling a Layerswap route, run one withdrawal on Sepolia and inspect the deposit action Layerswap returns. If it includes a helper call, confirm with Layerswap which contract it is and why, then list that address. Do not list an address you have not verified — listing the bridge token itself changes nothing, since calls on it must be `transfer` regardless.
 </Warning>
 
 ## Fetch Bridgeable Tokens
@@ -71,6 +94,10 @@ const allTokens = await sdk.getBridgingTokens();
 const ethereumTokens = await sdk.getBridgingTokens(ExternalChain.ETHEREUM);
 const solanaTokens = await sdk.getBridgingTokens(ExternalChain.SOLANA);
 ```
+
+<Note>
+  Layerswap-bridgeable tokens are sourced from the Layerswap API and only appear when `bridging.layerswapApiKey` is configured. Without it, discovery silently omits Layerswap routes.
+</Note>
 
 ## Connect External Wallets
 
@@ -106,7 +133,7 @@ const solWallet = await ConnectedSolanaWallet.from(
     chain: ExternalChain.SOLANA,
     provider: solanaProvider, // must implement signAndSendTransaction()
     address: solanaAddress,
-    chainId: solanaChainId, // e.g. mainnet/testnet genesis hash from wallet adapter
+    chainId: solanaChainId, // mainnet / testnet / devnet genesis hash from wallet adapter
   },
   wallet.getChainId()
 );
@@ -114,7 +141,7 @@ const solWallet = await ConnectedSolanaWallet.from(
 
 <Warning>
   External wallet network and Starknet network must match by environment:
-  Ethereum Mainnet with Starknet Mainnet, Ethereum Sepolia with Starknet Sepolia, Solana Mainnet with Starknet Mainnet, and Solana Testnet with Starknet Sepolia.
+  Ethereum Mainnet with Starknet Mainnet, Ethereum Sepolia with Starknet Sepolia, and Solana Mainnet with Starknet Mainnet. On Starknet Sepolia, the connected Solana wallet may be on **either Solana Testnet or Solana Devnet** — the right cluster depends on the route (see note below).
   
   | External Network | Identifier | Starknet Network |
   | --- | --- | --- |
@@ -122,7 +149,12 @@ const solWallet = await ConnectedSolanaWallet.from(
   | Ethereum Sepolia | `11155111` | Starknet Sepolia |
   | Solana Mainnet | `5eykt4UsFv8P8NJdTREpY1vzqKqZKvdp` | Starknet Mainnet |
   | Solana Testnet | `4uhcVJyU9pJkvQyS88uRDiswHXSCkY3z` | Starknet Sepolia |
+  | Solana Devnet | `EtWTRABZaYq6iMfeYKouRu166VU2xqa1` | Starknet Sepolia |
 </Warning>
+
+<Note>
+  On Starknet Sepolia the two Solana routes target different clusters: **Layerswap** uses **Solana Testnet** (`4uhcVJyU9pJkvQyS88uRDiswHXSCkY3z`) and **Hyperlane** uses **Solana Devnet** (`EtWTRABZaYq6iMfeYKouRu166VU2xqa1`). Connect the Solana wallet to the cluster matching the route you intend to use. On Starknet Mainnet, both routes use Solana Mainnet.
+</Note>
 
 ## Estimate and Deposit
 
@@ -159,20 +191,166 @@ const tx = await wallet.deposit(
 console.log(tx.hash);
 ```
 
+<Note>
+  On Ethereum a deposit can be two transactions: an ERC20 `approve` sized to the amount, then the deposit. Do not start a second deposit of the same token before the first has resolved. Both would read the same allowance and both would send an `approve`, and since `approve` sets rather than adds, the second deposit lands short and reverts. Serialize deposits per token, or set an allowance that covers them all before starting.
+</Note>
+
+## Withdraw from Starknet
+
+### Initiate (all protocols)
+
+```typescript
+import { Amount, fromAddress } from "starkzap";
+
+const token = ethereumTokens[0];
+if (!token) throw new Error("No bridge token available");
+
+const recipient = "0xYourEthereumAddress"; // L1 recipient
+
+// 1) L2 balance available to withdraw
+const balance = await wallet.getWithdrawBalance(token, ethWallet);
+
+// 2) Estimate L2 fee for initiating the withdrawal
+const fees = await wallet.getInitiateWithdrawFeeEstimate(token, ethWallet, {
+  protocol: "cctp",
+  fastTransfer: true,
+});
+
+// 3) Submit the Starknet burn/initiate transaction
+const tx = await wallet.initiateWithdraw(
+  recipient,
+  Amount.parse("25", token.decimals, token.symbol),
+  token,
+  ethWallet,
+  { protocol: "cctp", fastTransfer: true }
+);
+
+console.log(tx.hash);
+```
+
+### Complete (Canonical & CCTP only)
+
+OFT, Hyperlane, and Layerswap are single-step — delivery on the destination chain happens automatically. For Canonical and CCTP, a second L1 transaction is required once the state becomes `READY_TO_CLAIM`.
+
+```typescript
+// Poll until the withdrawal is ready to claim
+const result = await wallet.monitorWithdrawal(token, tx.hash);
+
+if (result.protocol === "cctp" && result.attestation && result.message) {
+  // Estimate the L1 gas cost before submitting
+  const l1Fee = await wallet.getCompleteWithdrawFeeEstimate(
+    Amount.parse("25", token.decimals, token.symbol),
+    recipient,
+    token,
+    ethWallet,
+    {
+      protocol: "cctp",
+      attestation: result.attestation,
+      message: result.message,
+      nonce: result.nonce,
+      expirationBlock: result.expirationBlock,
+    }
+  );
+
+  // Submit the L1 completion transaction
+  const l1Tx = await wallet.completeWithdraw(
+    recipient,
+    Amount.parse("25", token.decimals, token.symbol),
+    token,
+    ethWallet,
+    {
+      protocol: "cctp",
+      attestation: result.attestation,
+      message: result.message,
+      nonce: result.nonce,
+      expirationBlock: result.expirationBlock,
+    }
+  );
+
+  console.log(l1Tx.hash);
+}
+```
+
+### Auto-withdraw (Canonical only)
+
+Canonical supports an `autoWithdraw` option where a relayer handles L1 completion — no `completeWithdraw` call needed.
+
+```typescript
+const fees = await wallet.getInitiateWithdrawFeeEstimate(token, ethWallet, {
+  protocol: "canonical",
+  autoWithdraw: true,
+});
+
+await wallet.initiateWithdraw(
+  recipient,
+  Amount.parse("25", token.decimals, token.symbol),
+  token,
+  ethWallet,
+  {
+    protocol: "canonical",
+    autoWithdraw: true,
+    preferredFeeToken: fees.autoWithdrawFee?.token,
+  }
+);
+```
+
+## Monitor Bridge Transfers
+
+### Simplified state (recommended for UI)
+
+```typescript
+// Withdrawal state: "PENDING" | "READY_TO_CLAIM" | "COMPLETED" | "ERROR"
+const state = await wallet.getWithdrawalState(token, { starknetTxHash: tx.hash });
+
+// Deposit state: "PENDING" | "COMPLETED" | "ERROR"
+const depositState = await wallet.getDepositState(token, { externalTxHash: ethTxHash });
+```
+
+`WithdrawalState` values:
+- `PENDING` — bridging in progress, no user action needed
+- `READY_TO_CLAIM` — ready to finalize on L1; call `completeWithdraw` (CCTP/Canonical)
+- `COMPLETED` — bridge flow fully complete
+- `ERROR` — unrecoverable error
+
+### Detailed status (advanced use)
+
+Use `monitorWithdrawal` to get the full status snapshot including CCTP attestation data needed for `completeWithdraw`:
+
+```typescript
+const result = await wallet.monitorWithdrawal(token, tx.hash);
+// result.status: BridgeTransferStatus
+// For CCTP when READY_TO_CLAIM: result.attestation, result.message, result.nonce
+
+// You can pass a previously-fetched result back to avoid redundant network calls
+const state = await wallet.getWithdrawalState(token, result);
+```
+
+Similarly for deposits:
+
+```typescript
+const result = await wallet.monitorDeposit(token, ethTxHash);
+const depositState = await wallet.getDepositState(token, result);
+```
+
 ## Protocol Notes
 
-| Protocol | Chain | Notes |
-| --- | --- | --- |
-| `canonical` | Ethereum | Standard bridge flow; approval may be required for ERC20 tokens. |
-| `cctp` | Ethereum | Supports `fastTransfer`; fee estimate includes CCTP fast transfer bp fee. |
-| `oft` / `oft-migrated` | Ethereum | Requires `bridging.layerZeroApiKey`; mainnet-only route availability. |
-| `hyperlane` | Solana | Requires Solana + Hyperlane optional dependencies. |
+| Protocol | Chain | Deposit | Withdrawal |
+| --- | --- | --- | --- |
+| `canonical` | Ethereum | Standard flow; approval may be required for ERC20 tokens. | Two-step: initiate on L2, complete on L1. Supports `autoWithdraw` to skip the L1 step via relayer. |
+| `cctp` | Ethereum | Supports `fastTransfer`; fee estimate includes CCTP fast transfer bp fee. | Two-step: wait for Circle attestation, then call `completeWithdraw`. Expired attestations are re-requested automatically. |
+| `oft` / `oft-migrated` | Ethereum | Requires `bridging.layerZeroApiKey`; mainnet-only route availability. | Single-step: LayerZero relayer handles L1 delivery automatically. No `completeWithdraw` needed. |
+| `hyperlane` | Solana | Requires Solana + Hyperlane optional dependencies. | Single-step: Hyperlane relayer handles delivery automatically. |
+| `layerswap` | Ethereum & Solana | Requires `bridging.layerswapApiKey`; per-swap deposit address derived from the Layerswap API. Available on mainnet and testnet. | Single-step: Layerswap delivers on the destination chain automatically. No `completeWithdraw` needed. |
 
 ## Common Errors
 
 - **Chain mismatch**: token source chain and connected external wallet chain must match.
 - **Missing LayerZero key**: OFT routes require `bridging.layerZeroApiKey`.
+- **Missing Layerswap key**: Layerswap routes and Layerswap token discovery require `bridging.layerswapApiKey`; the key must match the environment (Mainnet key for Starknet Mainnet, Testnet key for Starknet Sepolia).
+- **Layerswap call not in `bridging.layerswapAllowedContracts`**: the deposit action carried a call to a contract other than the bridge token. Nothing was signed. Inspect the call, and list the contract only if it is a Layerswap helper you have verified.
 - **Unsupported chain pair**: Ethereum mainnet must pair with Starknet mainnet; testnet pairings must match.
+- **CCTP options missing**: `completeWithdraw` requires `options` with attestation data for CCTP routes — the parameter is non-optional in practice.
+- **Attestation expired**: CCTP attestations have an expiration block; re-attestation is requested automatically during `completeWithdraw`.
 
 For additional issues, see [Troubleshooting](/build/starkzap/troubleshooting).
 

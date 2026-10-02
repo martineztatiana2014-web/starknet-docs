@@ -95,13 +95,23 @@
                   "build/starkzap/connecting-wallets",
                   "build/starkzap/erc20",
                   "build/starkzap/staking",
+                  "build/starkzap/lst-staking",
                   "build/starkzap/bridging",
                   "build/starkzap/swap",
                   "build/starkzap/dollar-cost-average",
                   "build/starkzap/lending",
-                  "build/starkzap/confidential",
+                  "build/starkzap/troves",
                   "build/starkzap/transactions",
                   "build/starkzap/tx-builder"
+                ]
+              },
+              {
+                "group": "Privacy",
+                "icon": "shield-halved",
+                "pages": [
+                  "build/starkzap/privacy/overview",
+                  "build/starkzap/privacy/strk20",
+                  "build/starkzap/privacy/tongo"
                 ]
               },
               {
@@ -1175,6 +1185,10 @@
     }
   },
   "redirects": [
+    {
+      "source": "/build/starkzap/confidential",
+      "destination": "/build/starkzap/privacy/tongo"
+    },
     {
       "source": "/guides/quickstart/:slug*",
       "destination": "/build/quickstart/:slug*"
